@@ -29,6 +29,11 @@ public:
         treeView->setModel(worldModel.get());
         treeView->setSelectionMode(QAbstractItemView::SingleSelection);
         treeView->setHeaderHidden(true);
+        // drag and drop to reorder items
+        treeView->setDragEnabled(true);
+        treeView->setAcceptDrops(true);
+        treeView->setDropIndicatorShown(true);
+        treeView->setDragDropMode(QAbstractItemView::InternalMove);
 
         auto dock = new QDockWidget("World", this);
         dock->setWidget(treeView.get());

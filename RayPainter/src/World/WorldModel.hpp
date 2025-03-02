@@ -6,6 +6,7 @@
 #include <QByteArray>
 #include <QDataStream>
 #include <QIODevice>
+#include <QDebug>
 #include <memory>
 #include "WorldItem.hpp"
 #include "LightItem.hpp"
@@ -31,8 +32,9 @@ public:
             return { };
         auto parentItem = parent.isValid()
                               ? static_cast<WorldItem*>(parent.internalPointer()) : rootItem.get();
-        auto childItem = dynamic_cast<WorldItem*>(parentItem->children().value(row));
-        return childItem ? createIndex(row, column, childItem) : QModelIndex{ };
+        auto children = parentItem->orderedChildren();
+        return (row >= 0 && row < children.size())
+                   ? createIndex(row, column, children.at(row)) : QModelIndex{ };
     }
 
     QModelIndex parent(const QModelIndex& index) const override {
@@ -40,15 +42,19 @@ public:
             return { };
         auto childItem = static_cast<WorldItem*>(index.internalPointer());
         auto parentItem = dynamic_cast<WorldItem*>(childItem->parent());
-        return (parentItem == rootItem.get() || !parentItem)
-                   ? QModelIndex()
-                   : createIndex(parentItem->children().indexOf(childItem), 0, parentItem);
+        if (!parentItem || parentItem == rootItem.get())
+            return { };
+        auto grandparentItem = dynamic_cast<WorldItem*>(parentItem->parent());
+        if (!grandparentItem)
+            return { };
+        auto row = grandparentItem->orderedChildren().indexOf(parentItem);
+        return createIndex(row, 0, parentItem);
     }
 
     int rowCount(const QModelIndex& parent = { }) const override {
         auto parentItem = parent.isValid()
                               ? static_cast<WorldItem*>(parent.internalPointer()) : rootItem.get();
-        return parentItem->children().size();
+        return parentItem ? parentItem->orderedChildren().size() : 0;
     }
 
     int columnCount(const QModelIndex& parent = { }) const override { return 1; }
@@ -123,6 +129,27 @@ public:
         return mimeData;
     }
 
+    /** @brief Search for a child WorldItem by the given name */
+    WorldItem* findItemByName(WorldItem* parent, const QString& name) const {
+        WorldItem* item{ nullptr };
+        if (parent != nullptr) {
+            for (auto c: parent->children()) {
+                auto child = static_cast<WorldItem*>(c);
+                if (child->name() == name) {
+                    item = child;
+                    break;
+                } else {
+                    auto *found = findItemByName(child, name);
+                    if (found != nullptr) {
+                        item = found;
+                        break;
+                    }
+                }
+            }
+        }
+        return item;
+    }
+
     bool dropMimeData(const QMimeData* data, Qt::DropAction action,
                       int row, int column, const QModelIndex& parent) override {
         // reject drop actions for invalid types identified in mime data
@@ -134,6 +161,7 @@ public:
         QString name{ };
         stream >> name;
 
+        // find parent root/folder item
         auto parentItem = parent.isValid() ? static_cast<WorldItem*>(parent.internalPointer())
                                            : nullptr;
         if (!parentItem || (parentItem != rootLight.get()
@@ -141,13 +169,43 @@ public:
             return false;
         }
 
+        // get item instance being dragged
+        auto draggedItem = findItemByName(rootItem.get(), name);
+        if (!draggedItem)
+            return false;
+
         // reject the drop if it's in the wrong folder type for the item
-        bool isLight = parentItem == rootLight.get();
-        bool isShape = parentItem == rootShape.get();
-        if ((isLight && dynamic_cast<ShapeItem*>(parentItem))
-            || (isShape && dynamic_cast<LightItem*>(parentItem))) {
+        bool isLight = dynamic_cast<LightItem*>(draggedItem) != nullptr;
+        bool isShape = dynamic_cast<ShapeItem*>(draggedItem) != nullptr;
+        if ((isLight && parentItem != rootLight.get())
+            || (isShape && parentItem != rootShape.get())) {
+            // wrong folder!
             return false;
         }
+
+        // remove at dropped position
+        auto currentParent = static_cast<WorldItem*>(draggedItem->parent());
+        if (currentParent != nullptr) {
+            int oldRow = currentParent->orderedChildren().indexOf(draggedItem);
+            beginRemoveRows(indexForItem(currentParent), oldRow, oldRow);
+            draggedItem->setParent(nullptr);
+            endRemoveRows();
+        }
+
+        int newRow = (row >= 0 && row < parentItem->orderedChildren().size())
+                         ? row : parentItem->orderedChildren().size();
+        // before inserting, ordering is updated to new row
+        draggedItem->setOrder(newRow);
+        // insert at new row
+        beginInsertRows(indexForItem(parentItem), newRow, newRow);
+        draggedItem->setParent(parentItem);
+        endInsertRows();
+
+        // display ordering of all parent's children must be updated
+        auto ordered = parentItem->orderedChildren();
+        ordered.insert(newRow, draggedItem);
+        for (size_t i{}; i < ordered.size(); ++i)
+            ordered.at(i)->setOrder(i);
 
         return true;
     }
@@ -157,6 +215,11 @@ private:
     std::unique_ptr<WorldItem> rootItem{ nullptr };
     std::unique_ptr<WorldItem> rootLight{ nullptr };
     std::unique_ptr<WorldItem> rootShape{ nullptr };
+
+#ifdef IS_TEST_SUITE
+    friend class test_WorldModel;
+    friend class test_WorldTreeView;
+#endif
 
 private:
     Q_OBJECT
